@@ -1,23 +1,38 @@
-BlackRoad OS, Inc. Proprietary License
+PROPRIETARY LICENSE
 
-Copyright (c) 2024-2026 BlackRoad OS, Inc. All rights reserved.
+Copyright (c) 2026 BlackRoad OS, Inc.
+All Rights Reserved.
+
+CEO: Alexa Amundson
+Organization: BlackRoad OS, Inc.
+
+PROPRIETARY AND CONFIDENTIAL
 
 This software and associated documentation files (the "Software") are the
-proprietary property of BlackRoad OS, Inc.
+proprietary and confidential information of BlackRoad OS, Inc.
 
-PERMITTED USES:
-- Viewing and studying the source code for educational purposes
-- Testing and evaluation in non-production environments
-- Contributing improvements back to BlackRoad OS, Inc.
+GRANT OF LICENSE:
+Subject to the terms of this license, BlackRoad OS, Inc. grants you a
+limited, non-exclusive, non-transferable, revocable license to:
+- View and study the source code for educational purposes
+- Use the Software for testing and evaluation purposes only
+- Fork the repository for personal experimentation
 
 RESTRICTIONS:
-- Commercial use requires explicit written permission
-- Redistribution requires explicit written permission
-- Modification for production use requires explicit written permission
-- Sub-licensing is not permitted without written agreement
+You may NOT:
+- Use the Software for any commercial purpose
+- Resell, redistribute, or sublicense the Software
+- Use the Software in production environments without written permission
+- Remove or modify this license or any copyright notices
+- Create derivative works for commercial distribution
 
-For licensing inquiries: blackroad.systems@gmail.com
+TESTING ONLY:
+This Software is provided purely for testing, evaluation, and educational
+purposes. It is NOT licensed for commercial use or resale.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+For commercial licensing inquiries, contact:
+BlackRoad OS, Inc.
+Alexa Amundson, CEO
+blackroad.systems@gmail.com
 
-🖤🛣️ BlackRoad - Digital Sovereignty Infrastructure
+Last Updated: 2026-02-03
