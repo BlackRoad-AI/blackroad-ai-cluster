@@ -176,7 +176,7 @@ jobs:
       
       - name: ❌ Create Issue on Failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const title = '🚨 Self-Healing Failed: ${{ needs.analyze-failure.outputs.fix_type }}';
@@ -253,7 +253,7 @@ jobs:
       
       - name: 🚨 Create Health Alert
         if: steps.health.outputs.unhealthy == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const title = '🚨 Service Health Alert';
@@ -355,7 +355,7 @@ jobs:
       
       - name: 📝 Create Security Report
         if: steps.audit.outputs.vulnerabilities_found == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
