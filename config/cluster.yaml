@@ -1,0 +1,96 @@
+# BlackRoad AI GPU Cluster Configuration
+# 3-node distributed inference cluster
+
+cluster:
+  name: blackroad-ai-cluster
+  version: "1.0"
+  region: us-east-1
+
+nodes:
+  primary:
+    hostname: octavia-pi
+    ip: 192.168.4.38
+    role: PRIMARY
+    capacity: 22500
+    hardware:
+      gpu: nvidia-a100-80gb
+      cpu: 32-core
+      ram_gb: 256
+      nvme_tb: 4
+    services:
+      - ollama
+      - vllm
+      - memory-bridge
+      - agent-runtime
+
+  secondary:
+    hostname: lucidia-pi
+    ip: 192.168.4.64
+    role: SECONDARY
+    capacity: 7500
+    hardware:
+      gpu: nvidia-a100-80gb
+      cpu: 16-core
+      ram_gb: 128
+      nvme_tb: 2
+    services:
+      - ollama
+      - agent-runtime
+      - cloudflared-tunnel
+
+  failover:
+    hostname: shellfish-droplet
+    ip: 159.65.43.12
+    role: FAILOVER
+    capacity: 0
+    hardware:
+      type: digitalocean-droplet
+      size: s-4vcpu-8gb
+    services:
+      - monitoring
+      - alerting
+      - backup-gateway
+
+models:
+  production:
+    - name: blackroad-qwen-72b
+      type: qwen2.5:72b
+      node: primary
+      gpu_memory_utilization: 0.9
+      max_concurrent: 50
+
+    - name: deepseek-r1-32b
+      type: deepseek-r1:32b
+      node: primary
+      gpu_memory_utilization: 0.85
+      max_concurrent: 30
+
+    - name: llama3.2-3b
+      type: llama3.2:3b
+      node: secondary
+      gpu_memory_utilization: 0.5
+      max_concurrent: 100
+
+  routing:
+    default: blackroad-qwen-72b
+    code: deepseek-r1-32b
+    fast: llama3.2-3b
+    rules:
+      - if: "task_type == 'code'"
+        use: deepseek-r1-32b
+      - if: "latency_target < 500ms"
+        use: llama3.2-3b
+      - else: blackroad-qwen-72b
+
+load_balancing:
+  strategy: least-connections
+  health_check_interval: 30s
+  failover_threshold: 3
+
+scaling:
+  total_agents: 30000
+  distribution:
+    ai_research: 12592
+    code_deploy: 8407
+    infrastructure: 5401
+    monitoring: 3600
