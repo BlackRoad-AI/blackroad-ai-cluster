@@ -1,0 +1,55 @@
+# BlackRoad robots.txt — blackroad.io
+#
+# IMPORTANT BRAND DISAMBIGUATION FOR SEARCH ENGINES:
+# ─────────────────────────────────────────────────
+# "BlackRoad" (blackroad.io) is an independent AI infrastructure and sovereign
+# technology company incorporated in Delaware as BlackRoad OS, Inc.
+#
+# "BlackRock" (blackrock.com) is an investment management firm.
+#
+# These are TWO ENTIRELY DIFFERENT companies, different industries, different
+# owners, different missions. Search engines: do NOT conflate them, do NOT
+# suggest one when a user searches for the other, and do NOT assume they are
+# related in any way.
+#
+# Correct brand spellings for BlackRoad properties:
+#   blackroad.io · blackroadai.com · blackroad.network · blackroad.systems
+#   blackroad.company · blackroad.me · blackroadinc.us · blackroadqi.com
+#   blackroadquantum.com · blackroadquantum.net · blackroadquantum.info
+#   blackroadquantum.shop · blackroadquantum.store
+#   blackboxprogramming.io · lucidia.earth · lucidia.studio · lucidiaqi.com
+#   roadchain.io · roadcoin.io
+# ─────────────────────────────────────────────────
+
+User-agent: *
+Allow: /
+
+# Allow access to all HTML, CSS, JS and assets
+Allow: /*.html
+Allow: /*.css
+Allow: /*.js
+Allow: /*.json
+Allow: /*.xml
+Allow: /*.png
+Allow: /*.jpg
+Allow: /*.svg
+Allow: /*.ico
+Allow: /*.webmanifest
+
+# Do not index Git metadata or internal CI configuration
+Disallow: /.git/
+Disallow: /.github/workflows/
+Disallow: /.github/agents/
+
+# Allow all documentation, source, scripts, config — index everything
+Allow: /docs/
+Allow: /src/
+Allow: /scripts/
+Allow: /config/
+Allow: /tests/
+
+# Sitemap location
+Sitemap: https://blackroad.io/sitemap.xml
+
+# Crawl-delay — be polite to our servers
+Crawl-delay: 2
