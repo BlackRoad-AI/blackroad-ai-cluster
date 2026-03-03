@@ -1,0 +1,101 @@
+# BlackRoad AI Cluster — API Routing Configuration
+#
+# All AI-vendor API calls are intercepted by the local gateway and routed
+# exclusively through the BlackRoad infrastructure (Tailscale mesh +
+# Cloudflare Tunnel). No traffic flows directly to third-party endpoints.
+#
+# Architecture:
+#   Client → gateway:8787 → Cloudflare Tunnel → octavia-pi / lucidia-pi
+#                                              → Ollama / vLLM (local models)
+#
+# To activate:
+#   Set the environment variables below in your shell or .env file, then
+#   start the stack with:  docker compose up -d
+
+gateway:
+  host: 0.0.0.0
+  port: 8787
+  # Cloudflare tunnel hostname — set via `cloudflared tunnel route dns`
+  public_hostname: "${CLOUDFLARE_TUNNEL_HOSTNAME}"
+  auth:
+    # OAuth2 bearer token required on all inbound requests.
+    # Generate with:  openssl rand -hex 32
+    bearer_token: "${BLACKROAD_API_TOKEN}"
+    # Accepted OAuth scopes
+    scopes:
+      - inference
+      - admin
+
+# Local model endpoints — all served from the Tailscale mesh.
+# Traffic NEVER leaves the private network for these routes.
+backends:
+  primary:
+    node: octavia-pi
+    # Run `tailscale ip -4 octavia-pi` to obtain the real address, then set
+    # the BLACKROAD_PRIMARY_TS_IP environment variable or replace this value.
+    tailscale_ip: "${BLACKROAD_PRIMARY_TS_IP}"
+    ollama_port: 11434
+    vllm_port: 8000
+    models:
+      - blackroad-qwen-72b
+      - deepseek-r1-32b
+
+  secondary:
+    node: lucidia-pi
+    # Run `tailscale ip -4 lucidia-pi` to obtain the real address, then set
+    # the BLACKROAD_SECONDARY_TS_IP environment variable or replace this value.
+    tailscale_ip: "${BLACKROAD_SECONDARY_TS_IP}"
+    ollama_port: 11434
+    models:
+      - llama3.2-3b
+
+# Vendor route overrides — map standard API paths to local equivalents.
+# The gateway rewrites these URLs before forwarding to the local backend.
+# This ensures @blackboxprogramming and @lucidia agents never contact
+# third-party inference providers directly.
+routes:
+  # OpenAI-compatible chat completions → local Ollama
+  - match: "/v1/chat/completions"
+    backend: primary
+    rewrite_host: true
+    allowed_models:
+      - blackroad-qwen-72b
+      - deepseek-r1-32b
+      - llama3.2-3b
+
+  # OpenAI-compatible embeddings → local Ollama
+  - match: "/v1/embeddings"
+    backend: primary
+    rewrite_host: true
+
+  # Health / status
+  - match: "/v1/health"
+    backend: primary
+    auth_required: false
+
+# Blocked external endpoints.
+# The gateway will return 403 for requests targeting these hosts,
+# preventing accidental calls to third-party providers.
+blocked_upstreams:
+  - api.openai.com
+  - api.anthropic.com
+  - copilot.microsoft.com
+  - api.cohere.com
+  - generativelanguage.googleapis.com
+
+# OAuth token introspection (optional — for validating third-party JWTs
+# before they reach the local cluster).
+oauth:
+  enabled: true
+  # Token is validated locally; no outbound call to any auth server.
+  validation: local
+  # Accepted issuers — only tokens from these issuers are allowed.
+  allowed_issuers:
+    - "https://blackroad.ai"
+  token_ttl_seconds: 3600
+
+# Tailscale ACL tag for this node (used by the cluster bootstrap script).
+tailscale:
+  tags:
+    - "tag:blackroad-gateway"
+    - "tag:blackroad-cluster"
