@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from ai_cluster import (
     ClusterNode, ClusterJob, ClusterHealth,
     AIClusterOrchestrator,
+    OLLAMA_HANDLES, OllamaRouter,
 )
 
 
@@ -160,3 +161,105 @@ def test_balance_load_migrates_jobs(orch_2nodes):
         "SELECT current_load FROM nodes WHERE node_id='n1'"
     ).fetchone()
     assert row[0] < 0.8
+
+
+# ── OllamaRouter ─────────────────────────────────────────────────────────────
+@pytest.fixture
+def router(orch):
+    return OllamaRouter(orch, default_ollama_url="http://localhost:11434")
+
+
+@pytest.fixture
+def router_with_node(orch):
+    orch.register_node(ClusterNode(
+        node_id="ollama-node", name="Ollama-GPU", host="192.168.4.38",
+        port=11434, gpu_count=2, current_load=0.1
+    ))
+    return OllamaRouter(orch, default_ollama_url="http://localhost:11434")
+
+
+def test_ollama_handles_set():
+    assert "@copilot" in OLLAMA_HANDLES
+    assert "@lucidia" in OLLAMA_HANDLES
+    assert "@blackboxprogramming" in OLLAMA_HANDLES
+    assert "@ollama" in OLLAMA_HANDLES
+
+
+def test_should_route_copilot(router):
+    assert router.should_route_to_ollama("Hey @copilot, write me a function")
+
+
+def test_should_route_lucidia(router):
+    assert router.should_route_to_ollama("@lucidia generate a plan")
+
+
+def test_should_route_blackboxprogramming(router):
+    assert router.should_route_to_ollama("@blackboxprogramming fix this bug")
+
+
+def test_should_route_ollama(router):
+    assert router.should_route_to_ollama("@ollama tell me a joke")
+
+
+def test_should_not_route_without_handle(router):
+    assert not router.should_route_to_ollama("Just a regular message")
+
+
+def test_case_insensitive_routing(router):
+    assert router.should_route_to_ollama("@COPILOT help me")
+    assert router.should_route_to_ollama("@LUCIDIA analyze this")
+
+
+def test_resolve_endpoint_no_nodes_returns_default(router):
+    assert router.resolve_endpoint() == "http://localhost:11434"
+
+
+def test_resolve_endpoint_picks_online_node(router_with_node):
+    endpoint = router_with_node.resolve_endpoint()
+    assert endpoint == "http://192.168.4.38:11434"
+
+
+def test_build_request_returns_ollama_provider(router):
+    req = router.build_request("@ollama summarise this doc")
+    assert req["provider"] == "ollama"
+
+
+def test_build_request_contains_url(router):
+    req = router.build_request("@copilot write tests")
+    assert req["url"].startswith("http://")
+    assert "/api/generate" in req["url"]
+
+
+def test_build_request_contains_model(router):
+    req = router.build_request("@lucidia list ideas")
+    assert req["model"] == OllamaRouter.DEFAULT_MODEL
+
+
+def test_build_request_custom_model(router):
+    req = router.build_request("@ollama explain transformers", model="deepseek-r1:7b")
+    assert req["model"] == "deepseek-r1:7b"
+
+
+def test_build_request_contains_prompt(router):
+    msg = "@blackboxprogramming refactor this code"
+    req = router.build_request(msg)
+    assert req["prompt"] == msg
+
+
+def test_build_request_raises_without_handle(router):
+    with pytest.raises(ValueError, match="no Ollama routing handle"):
+        router.build_request("This message has no handle")
+
+
+def test_build_request_uses_least_loaded_node(orch):
+    orch.register_node(ClusterNode(
+        node_id="n-high", name="High-Load", host="10.0.0.1",
+        port=11434, current_load=0.9
+    ))
+    orch.register_node(ClusterNode(
+        node_id="n-low", name="Low-Load", host="10.0.0.2",
+        port=11434, current_load=0.1
+    ))
+    r = OllamaRouter(orch)
+    req = r.build_request("@ollama ping")
+    assert "10.0.0.2" in req["endpoint"]

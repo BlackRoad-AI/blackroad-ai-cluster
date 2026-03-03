@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -598,6 +599,369 @@ class Cluster:
 
     def close(self) -> None:
         self._conn.close()
+
+
+# ── Ollama-first orchestration ────────────────────────────────────────────────
+# All mentions of the handles below are routed to the local Ollama service.
+# No external AI provider (Copilot, Claude, ChatGPT, etc.) is involved.
+OLLAMA_HANDLES: frozenset = frozenset(
+    {"@copilot", "@lucidia", "@blackboxprogramming", "@ollama"}
+)
+
+
+@dataclass
+class ClusterNode:
+    """Compute node registered in the BlackRoad AI cluster (Ollama-first)."""
+    node_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""
+    host: str = "localhost"
+    port: int = 11434
+    gpu_count: int = 1
+    gpu_memory_gb: float = 16.0
+    max_concurrent_jobs: int = 4
+    status: str = "offline"
+    current_load: float = 0.0
+    last_heartbeat: Optional[str] = None
+    registered_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+@dataclass
+class ClusterJob:
+    """Unit of work dispatched to a ClusterNode running Ollama."""
+    job_id: str = field(
+        default_factory=lambda: f"job-{str(uuid.uuid4())[:8]}"
+    )
+    model_id: str = ""
+    node_id: Optional[str] = None
+    job_type: str = "inference"
+    priority: int = 5
+    gpu_required: int = 1
+    status: str = "queued"
+    output_tokens: int = 0
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+@dataclass
+class ClusterHealth:
+    """Point-in-time health snapshot for the Ollama cluster."""
+    total_nodes: int = 0
+    online_nodes: int = 0
+    total_gpus: int = 0
+    avg_load: float = 0.0
+    queued_jobs: int = 0
+    running_jobs: int = 0
+
+
+class AIClusterOrchestrator:
+    """
+    Manages BlackRoad cluster nodes and jobs, all served by local Ollama.
+
+    Every inference request — whether triggered by @copilot, @lucidia,
+    @blackboxprogramming, or @ollama — is routed here and dispatched to
+    a local Ollama endpoint.  No external AI provider is used.
+    """
+
+    _DEFAULT_DB = Path.home() / ".blackroad" / "ai_cluster_orch.db"
+
+    def __init__(self, db_path: Path = _DEFAULT_DB) -> None:
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    # ── Schema ────────────────────────────────────────────────────────────────
+    def _init_schema(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS nodes (
+                node_id TEXT PRIMARY KEY,
+                name TEXT DEFAULT '',
+                host TEXT DEFAULT 'localhost',
+                port INTEGER DEFAULT 11434,
+                gpu_count INTEGER DEFAULT 1,
+                gpu_memory_gb REAL DEFAULT 16.0,
+                max_concurrent_jobs INTEGER DEFAULT 4,
+                status TEXT DEFAULT 'offline',
+                current_load REAL DEFAULT 0.0,
+                last_heartbeat TEXT,
+                registered_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                model_id TEXT DEFAULT '',
+                node_id TEXT,
+                job_type TEXT DEFAULT 'inference',
+                priority INTEGER DEFAULT 5,
+                gpu_required INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'queued',
+                output_tokens INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_orch_jobs_status ON jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_orch_nodes_load
+                ON nodes(status, current_load);
+        """)
+        self._conn.commit()
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+    def _node_from_row(self, row) -> ClusterNode:
+        return ClusterNode(
+            node_id=row["node_id"], name=row["name"],
+            host=row["host"], port=row["port"],
+            gpu_count=row["gpu_count"], gpu_memory_gb=row["gpu_memory_gb"],
+            max_concurrent_jobs=row["max_concurrent_jobs"],
+            status=row["status"], current_load=row["current_load"],
+            last_heartbeat=row["last_heartbeat"],
+            registered_at=row["registered_at"],
+        )
+
+    def _job_from_row(self, row) -> ClusterJob:
+        return ClusterJob(
+            job_id=row["job_id"], model_id=row["model_id"],
+            node_id=row["node_id"], job_type=row["job_type"],
+            priority=row["priority"], gpu_required=row["gpu_required"],
+            status=row["status"], output_tokens=row["output_tokens"],
+            created_at=row["created_at"],
+        )
+
+    def _running_job_count(self, node_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE node_id=? AND status='running'",
+            (node_id,),
+        ).fetchone()
+        return row[0] if row else 0
+
+    # ── Public API ────────────────────────────────────────────────────────────
+    def register_node(self, node: ClusterNode) -> ClusterNode:
+        """Register a node and bring it online."""
+        node.status = "online"
+        node.last_heartbeat = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (node.node_id, node.name, node.host, node.port,
+             node.gpu_count, node.gpu_memory_gb, node.max_concurrent_jobs,
+             node.status, node.current_load, node.last_heartbeat,
+             node.registered_at),
+        )
+        self._conn.commit()
+        return node
+
+    def list_nodes(self) -> List[ClusterNode]:
+        """Return all nodes ordered by load (least-loaded first)."""
+        rows = self._conn.execute(
+            "SELECT * FROM nodes ORDER BY current_load ASC"
+        ).fetchall()
+        return [self._node_from_row(r) for r in rows]
+
+    def submit_job(self, job: ClusterJob) -> ClusterJob:
+        """Enqueue a job for scheduling."""
+        job.status = "queued"
+        self._conn.execute(
+            "INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?,?)",
+            (job.job_id, job.model_id, job.node_id, job.job_type,
+             job.priority, job.gpu_required, job.status,
+             job.output_tokens, job.created_at),
+        )
+        self._conn.commit()
+        return job
+
+    def schedule_jobs(self) -> int:
+        """
+        Assign queued jobs to the least-loaded available nodes.
+
+        Returns the number of jobs successfully scheduled.
+        """
+        queued_rows = self._conn.execute(
+            "SELECT * FROM jobs WHERE status='queued' "
+            "ORDER BY priority DESC, created_at ASC"
+        ).fetchall()
+
+        scheduled = 0
+        for job_row in queued_rows:
+            job = self._job_from_row(job_row)
+            node_rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE status='online' "
+                "ORDER BY current_load ASC"
+            ).fetchall()
+            for node_row in node_rows:
+                node = self._node_from_row(node_row)
+                if self._running_job_count(node.node_id) < node.max_concurrent_jobs:
+                    self._conn.execute(
+                        "UPDATE jobs SET status='running', node_id=? "
+                        "WHERE job_id=?",
+                        (node.node_id, job.job_id),
+                    )
+                    scheduled += 1
+                    break
+
+        self._conn.commit()
+        return scheduled
+
+    def complete_job(self, job_id: str, output_tokens: int = 0) -> None:
+        """Mark a job as done and record its output token count."""
+        self._conn.execute(
+            "UPDATE jobs SET status='done', output_tokens=? WHERE job_id=?",
+            (output_tokens, job_id),
+        )
+        self._conn.commit()
+
+    def get_cluster_health(self) -> ClusterHealth:
+        """Return a health snapshot of the entire cluster."""
+        nodes = self.list_nodes()
+        health = ClusterHealth(
+            total_nodes=len(nodes),
+            online_nodes=sum(1 for n in nodes if n.status == "online"),
+            total_gpus=sum(n.gpu_count for n in nodes),
+            avg_load=round(
+                sum(n.current_load for n in nodes) / max(len(nodes), 1), 4
+            ) if nodes else 0.0,
+        )
+        for status, cnt in self._conn.execute(
+            "SELECT status, COUNT(*) FROM jobs GROUP BY status"
+        ).fetchall():
+            if status == "queued":
+                health.queued_jobs = cnt
+            elif status == "running":
+                health.running_jobs = cnt
+        return health
+
+    def balance_load(self) -> int:
+        """
+        Migrate a running job from each overloaded node to an idle one.
+
+        Returns the number of jobs migrated.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE status='online' ORDER BY current_load ASC"
+        ).fetchall()
+        nodes = [self._node_from_row(r) for r in rows]
+        if len(nodes) < 2:
+            logging.warning("Need ≥2 online nodes to balance.")
+            return 0
+
+        migrated = 0
+        idle_nodes = [n for n in nodes if n.current_load < 0.3]
+        hot_nodes = [n for n in nodes if n.current_load > 0.7]
+
+        for hot in hot_nodes:
+            if not idle_nodes:
+                break
+            target = min(idle_nodes, key=lambda n: n.current_load)
+            if hot.current_load - target.current_load < 0.35:
+                continue
+            job_row = self._conn.execute(
+                "SELECT job_id FROM jobs WHERE node_id=? AND status='running' "
+                "ORDER BY priority ASC LIMIT 1",
+                (hot.node_id,),
+            ).fetchone()
+            if not job_row:
+                continue
+            delta = 0.15
+            self._conn.execute(
+                "UPDATE jobs SET node_id=? WHERE job_id=?",
+                (target.node_id, job_row[0]),
+            )
+            self._conn.execute(
+                "UPDATE nodes SET current_load=MAX(0,current_load-?) "
+                "WHERE node_id=?",
+                (delta, hot.node_id),
+            )
+            self._conn.execute(
+                "UPDATE nodes SET current_load=MIN(1,current_load+?) "
+                "WHERE node_id=?",
+                (delta, target.node_id),
+            )
+            migrated += 1
+            target.current_load = min(1.0, target.current_load + delta)
+            if target.current_load >= 0.6:
+                idle_nodes.remove(target)
+
+        self._conn.commit()
+        return migrated
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class OllamaRouter:
+    """
+    Routes every request that contains an Ollama handle to the local Ollama
+    service running on the BlackRoad cluster.
+
+    Supported handles (case-insensitive):
+        @copilot, @lucidia, @blackboxprogramming, @ollama
+
+    No external AI provider is contacted — all inference stays on your
+    own hardware.
+    """
+
+    DEFAULT_MODEL = "qwen2.5:7b"
+
+    def __init__(
+        self,
+        orchestrator: AIClusterOrchestrator,
+        default_ollama_url: str = "http://localhost:11434",
+        default_model: str = DEFAULT_MODEL,
+    ) -> None:
+        self.orchestrator = orchestrator
+        self.default_ollama_url = default_ollama_url
+        self.default_model = default_model
+
+    # ── Public API ────────────────────────────────────────────────────────────
+    def should_route_to_ollama(self, message: str) -> bool:
+        """Return True when *message* contains at least one Ollama handle."""
+        lower = message.lower()
+        return any(handle in lower for handle in OLLAMA_HANDLES)
+
+    def resolve_endpoint(self) -> str:
+        """
+        Return the base URL of the least-loaded online Ollama node.
+
+        Falls back to *default_ollama_url* when no nodes are online.
+        """
+        online = [
+            n for n in self.orchestrator.list_nodes()
+            if n.status == "online"
+        ]
+        if online:
+            best = min(online, key=lambda n: n.current_load)
+            return f"http://{best.host}:{best.port}"
+        return self.default_ollama_url
+
+    def build_request(
+        self, message: str, model: Optional[str] = None
+    ) -> Dict:
+        """
+        Build an Ollama-compatible request payload.
+
+        Args:
+            message: User message; must contain an Ollama routing handle.
+            model:   Override the default model name.
+
+        Returns:
+            dict with keys: provider, endpoint, url, model, prompt.
+
+        Raises:
+            ValueError: when *message* contains no recognised Ollama handle.
+        """
+        if not self.should_route_to_ollama(message):
+            raise ValueError(
+                f"Message contains no Ollama routing handle. "
+                f"Supported handles: {sorted(OLLAMA_HANDLES)}"
+            )
+        endpoint = self.resolve_endpoint()
+        chosen_model = model or self.default_model
+        return {
+            "provider": "ollama",
+            "endpoint": endpoint,
+            "url": f"{endpoint}/api/generate",
+            "model": chosen_model,
+            "prompt": message,
+        }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
