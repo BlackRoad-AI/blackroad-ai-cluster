@@ -1,0 +1,45 @@
+# Cloudflare Workers configuration — BlackRoad AI Cluster
+# Deploy with: wrangler deploy
+# Docs: https://developers.cloudflare.com/workers/configuration/
+
+name = "blackroad-ai-cluster"
+main = "workers/index.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Send logs to Workers Logpush
+[observability]
+enabled = true
+
+# --------------------------------------------------------------------------- #
+# Environments
+# --------------------------------------------------------------------------- #
+
+[env.staging]
+name = "blackroad-ai-cluster-staging"
+vars = { ENVIRONMENT = "staging" }
+
+[env.production]
+name = "blackroad-ai-cluster"
+vars = { ENVIRONMENT = "production" }
+
+# --------------------------------------------------------------------------- #
+# Durable Objects — persistent state for long-running AI tasks
+# --------------------------------------------------------------------------- #
+
+[[durable_objects.bindings]]
+name        = "TASK_QUEUE"
+class_name  = "TaskQueue"
+
+[[migrations]]
+tag                 = "v1"
+new_classes         = ["TaskQueue"]
+
+# --------------------------------------------------------------------------- #
+# KV Namespaces — caching cluster metadata
+# --------------------------------------------------------------------------- #
+# Uncomment after creating the namespace:
+#   wrangler kv:namespace create CLUSTER_CACHE
+# [[kv_namespaces]]
+# binding = "CLUSTER_CACHE"
+# id      = "YOUR_KV_NAMESPACE_ID"

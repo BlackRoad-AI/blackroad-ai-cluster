@@ -773,3 +773,296 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ── High-level orchestrator API (test-compatible) ─────────────────────────────
+# These classes provide a higher-level, test-friendly API on top of the Cluster.
+
+@dataclass
+class ClusterNode:
+    """High-level node descriptor used by AIClusterOrchestrator."""
+    node_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = "unnamed"
+    host: str = "localhost"
+    gpu_count: int = 1
+    gpu_memory_gb: float = 16.0
+    max_concurrent_jobs: int = 4
+    status: str = "offline"
+    current_load: float = 0.0
+    last_heartbeat: Optional[str] = None
+
+
+@dataclass
+class ClusterJob:
+    """High-level job descriptor used by AIClusterOrchestrator."""
+    job_id: str = field(default_factory=lambda: f"job-{str(uuid.uuid4())[:8]}")
+    model_id: str = ""
+    job_type: str = "inference"
+    priority: int = 5
+    gpu_required: int = 1
+    status: str = "queued"
+    node_id: Optional[str] = None
+    output_tokens: int = 0
+
+
+@dataclass
+class ClusterHealth:
+    """Point-in-time health snapshot for AIClusterOrchestrator."""
+    total_nodes: int = 0
+    online_nodes: int = 0
+    queued_jobs: int = 0
+    total_gpus: int = 0
+    avg_load: float = 0.0
+
+
+class AIClusterOrchestrator:
+    """
+    High-level AI cluster orchestrator.
+
+    Manages ClusterNode registrations, ClusterJob submissions, priority
+    scheduling, health reporting, and automatic load balancing — all
+    persisted to SQLite.
+
+    Example::
+
+        orch = AIClusterOrchestrator()
+        orch.register_node(ClusterNode(node_id="n1", name="A100-1", gpu_count=2))
+        orch.submit_job(ClusterJob(job_id="j1", model_id="llm-3b"))
+        orch.schedule_jobs()
+        orch.complete_job("j1", output_tokens=512)
+        orch.close()
+    """
+
+    def __init__(self, db_path: Optional[Path] = None) -> None:
+        path = Path(db_path) if db_path else (Path.home() / ".blackroad" / "ai_cluster_orch.db")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS nodes (
+                node_id           TEXT PRIMARY KEY,
+                name              TEXT DEFAULT 'unnamed',
+                host              TEXT DEFAULT 'localhost',
+                gpu_count         INTEGER DEFAULT 1,
+                gpu_memory_gb     REAL DEFAULT 16.0,
+                max_concurrent_jobs INTEGER DEFAULT 4,
+                status            TEXT DEFAULT 'offline',
+                current_load      REAL DEFAULT 0.0,
+                last_heartbeat    TEXT
+            );
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id        TEXT PRIMARY KEY,
+                model_id      TEXT DEFAULT '',
+                job_type      TEXT DEFAULT 'inference',
+                priority      INTEGER DEFAULT 5,
+                gpu_required  INTEGER DEFAULT 1,
+                status        TEXT DEFAULT 'queued',
+                node_id       TEXT,
+                output_tokens INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_orch_jobs_status ON jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_orch_nodes_load  ON nodes(status, current_load);
+        """)
+        self._conn.commit()
+
+    # ── Node management ───────────────────────────────────────────────────────
+
+    def register_node(self, node: ClusterNode) -> ClusterNode:
+        """Register (or re-register) a node and bring it online."""
+        now = datetime.utcnow().isoformat()
+        node.status = "online"
+        node.last_heartbeat = now
+        self._conn.execute(
+            "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?,?)",
+            (node.node_id, node.name, node.host, node.gpu_count,
+             node.gpu_memory_gb, node.max_concurrent_jobs,
+             node.status, node.current_load, node.last_heartbeat)
+        )
+        self._conn.commit()
+        return node
+
+    def list_nodes(self) -> List[ClusterNode]:
+        """Return all registered nodes."""
+        rows = self._conn.execute(
+            "SELECT * FROM nodes ORDER BY current_load ASC"
+        ).fetchall()
+        return [ClusterNode(
+            node_id=r["node_id"], name=r["name"], host=r["host"],
+            gpu_count=r["gpu_count"], gpu_memory_gb=r["gpu_memory_gb"],
+            max_concurrent_jobs=r["max_concurrent_jobs"], status=r["status"],
+            current_load=r["current_load"], last_heartbeat=r["last_heartbeat"],
+        ) for r in rows]
+
+    # ── Job management ────────────────────────────────────────────────────────
+
+    def submit_job(self, job: ClusterJob) -> ClusterJob:
+        """Enqueue a job for scheduling."""
+        job.status = "queued"
+        self._conn.execute(
+            "INSERT OR REPLACE INTO jobs VALUES (?,?,?,?,?,?,?,?)",
+            (job.job_id, job.model_id, job.job_type, job.priority,
+             job.gpu_required, job.status, job.node_id, job.output_tokens)
+        )
+        self._conn.commit()
+        return job
+
+    def schedule_jobs(self) -> int:
+        """
+        Assign queued jobs to available nodes (highest priority first).
+
+        Returns the number of jobs successfully scheduled.
+        """
+        queued = self._conn.execute(
+            "SELECT * FROM jobs WHERE status='queued' "
+            "ORDER BY priority DESC"
+        ).fetchall()
+        if not queued:
+            return 0
+
+        nodes = self._conn.execute(
+            "SELECT * FROM nodes WHERE status='online' "
+            "ORDER BY current_load ASC"
+        ).fetchall()
+        if not nodes:
+            return 0
+
+        scheduled = 0
+        node_running: Dict[str, int] = {}
+
+        for job in queued:
+            for node in nodes:
+                nid = node["node_id"]
+                if nid not in node_running:
+                    cnt = self._conn.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE node_id=? AND status='running'",
+                        (nid,)
+                    ).fetchone()[0]
+                    node_running[nid] = cnt
+
+                if node_running[nid] >= node["max_concurrent_jobs"]:
+                    continue
+
+                load_inc = round(
+                    job["gpu_required"] / max(node["gpu_count"], 1) * 0.25, 4
+                )
+                new_load = min(1.0, node["current_load"] + load_inc)
+                self._conn.execute(
+                    "UPDATE jobs SET status='running', node_id=? WHERE job_id=?",
+                    (nid, job["job_id"])
+                )
+                self._conn.execute(
+                    "UPDATE nodes SET current_load=? WHERE node_id=?",
+                    (new_load, nid)
+                )
+                node_running[nid] += 1
+                scheduled += 1
+                break
+
+        self._conn.commit()
+        return scheduled
+
+    def complete_job(self, job_id: str, output_tokens: int = 0) -> None:
+        """Mark a job as done and release load from its node."""
+        row = self._conn.execute(
+            "SELECT node_id, gpu_required FROM jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if row:
+            nid, gpu_req = row["node_id"], row["gpu_required"]
+            self._conn.execute(
+                "UPDATE jobs SET status='done', output_tokens=? WHERE job_id=?",
+                (output_tokens, job_id)
+            )
+            if nid:
+                node_row = self._conn.execute(
+                    "SELECT gpu_count FROM nodes WHERE node_id=?", (nid,)
+                ).fetchone()
+                if node_row:
+                    delta = round(gpu_req / max(node_row[0], 1) * 0.25, 4)
+                    self._conn.execute(
+                        "UPDATE nodes SET current_load=MAX(0,current_load-?) "
+                        "WHERE node_id=?", (delta, nid)
+                    )
+            self._conn.commit()
+
+    # ── Health ────────────────────────────────────────────────────────────────
+
+    def get_cluster_health(self) -> ClusterHealth:
+        """Return a point-in-time snapshot of cluster health."""
+        health = ClusterHealth()
+        node_rows = self._conn.execute("SELECT * FROM nodes").fetchall()
+        loads: List[float] = []
+        for r in node_rows:
+            health.total_nodes += 1
+            health.total_gpus += r["gpu_count"]
+            loads.append(r["current_load"])
+            if r["status"] == "online":
+                health.online_nodes += 1
+        health.avg_load = round(sum(loads) / max(len(loads), 1), 4) if loads else 0.0
+
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status='queued'"
+        ).fetchone()
+        health.queued_jobs = row[0] if row else 0
+        return health
+
+    # ── Load balancing ────────────────────────────────────────────────────────
+
+    def balance_load(self, skew_threshold: float = 0.35) -> int:
+        """
+        Migrate running jobs from overloaded nodes (>0.7) to idle ones (<0.3).
+
+        Returns the number of jobs migrated.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE status='online' ORDER BY current_load ASC"
+        ).fetchall()
+        nodes = list(rows)
+        if len(nodes) < 2:
+            print(f"{Y}⚠{NC}  Need ≥2 online nodes to rebalance.")
+            return 0
+
+        idle_nodes = [n for n in nodes if n["current_load"] < 0.3]
+        hot_nodes  = [n for n in nodes if n["current_load"] > 0.7]
+        migrated = 0
+
+        for hot in hot_nodes:
+            if not idle_nodes:
+                break
+            target = min(idle_nodes, key=lambda n: n["current_load"])
+            if hot["current_load"] - target["current_load"] < skew_threshold:
+                continue
+            job_row = self._conn.execute(
+                "SELECT job_id FROM jobs WHERE node_id=? AND status='running' "
+                "ORDER BY priority ASC LIMIT 1",
+                (hot["node_id"],)
+            ).fetchone()
+            if not job_row:
+                continue
+            delta = 0.15
+            self._conn.execute(
+                "UPDATE jobs SET node_id=? WHERE job_id=?",
+                (target["node_id"], job_row["job_id"])
+            )
+            self._conn.execute(
+                "UPDATE nodes SET current_load=MAX(0,current_load-?) WHERE node_id=?",
+                (delta, hot["node_id"])
+            )
+            self._conn.execute(
+                "UPDATE nodes SET current_load=MIN(1,current_load+?) WHERE node_id=?",
+                (delta, target["node_id"])
+            )
+            migrated += 1
+            # Refresh estimate to avoid double-targeting same idle node
+            new_load = target["current_load"] + delta
+            idle_nodes = [n for n in idle_nodes
+                          if n["node_id"] != target["node_id"] or new_load < 0.3]
+
+        self._conn.commit()
+        return migrated
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self._conn.close()
