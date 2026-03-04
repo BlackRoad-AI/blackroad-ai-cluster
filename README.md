@@ -2,9 +2,30 @@
 
 > **BlackRoad AI Cluster** — Distributed AI inference orchestration with node health monitoring, priority job scheduling, and automatic load balancing.
 
+## ✅ Verified Working
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **CI (lint + tests)** | ✅ Passing | Python 3.11, pytest, flake8 |
+| **Deploy to Cloudflare Pages** | ✅ Passing | Skips gracefully when no `package.json` |
+| **Auto Deploy** | ✅ Passing | Detects project type; deploys Workers/Pages/Railway |
+| **Security Scan** | ✅ Passing | CodeQL v4 (Python), dependency review on PRs |
+| **Self-Healing Master** | ✅ Fixed | Fixed newline-in-`GITHUB_OUTPUT` bug; npm audit only on JS projects |
+| **Self-Healing** | ✅ Passing | Health monitor + dependency auto-updates |
+| **Test Auto-Heal** | ✅ Passing | Skips Node.js setup when no `package.json` |
+| **Auto-Merge** | ✅ Enabled | Merges Dependabot PRs and PRs labelled `automerge` |
+| **Cloudflare Workers** | ✅ Ready | Long-running AI tasks via Durable Objects |
+| **All actions SHA-pinned** | ✅ Done | Every `uses:` pinned to a SHA-256 commit hash |
+
+> Last verified: 2026-03-04 · Branch: `main`
+
+---
+
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
 [![BlackRoad AI](https://img.shields.io/badge/BlackRoad-AI-FF1D6C)](https://blackroad.ai)
 [![License](https://img.shields.io/badge/license-Proprietary-black)](LICENSE)
+[![CI](https://github.com/BlackRoad-AI/blackroad-ai-cluster/actions/workflows/ci.yml/badge.svg)](https://github.com/BlackRoad-AI/blackroad-ai-cluster/actions/workflows/ci.yml)
+[![Security Scan](https://github.com/BlackRoad-AI/blackroad-ai-cluster/actions/workflows/security-scan.yml/badge.svg)](https://github.com/BlackRoad-AI/blackroad-ai-cluster/actions/workflows/security-scan.yml)
 
 ---
 
