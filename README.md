@@ -1,3 +1,11 @@
+# blackroad-ai-cluster
+
+> Clustering and orchestration system for BlackRoad AI models across Pi network
+
+Part of the [BlackRoad OS](https://blackroad.io) ecosystem — [BlackRoad-AI](https://github.com/BlackRoad-AI)
+
+---
+
 # Blackroad Ai Cluster
 
 Clustering and orchestration system for BlackRoad AI models across Pi network
